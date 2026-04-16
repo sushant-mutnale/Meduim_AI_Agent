@@ -67,30 +67,126 @@ async def ranking_node(state: AgentState):
     result = await loop.run_in_executor(executor, compute_ranking, state["clustered_topics"], failed_topics)
     return {"ranking_data": result, "selected_topic": result.get("selected_topic", "")}
 
-# ----------------- Query Expansion -----------------
+# ----------------- Query Expansion (PDF Step 2: Hybrid) -----------------
+# Intent buckets and weights from the PDF
+INTENT_WEIGHTS = {
+    "problem": 1.3,
+    "comparison": 1.2,
+    "beginner": 1.1,
+    "trend": 1.0,
+    "intermediate": 1.0,
+    "advanced": 0.9,
+}
+
+# Keywords that boost query quality (PDF Step 2: keyword strength)
+STRONG_KEYWORDS = {"how to", "what is", "vs", "best", "why", "guide", "tutorial", "example"}
+
+
+def _filter_queries(queries: list) -> list:
+    """
+    PDF Step 2 — Rule-based local filtering:
+    - Max 10 words per query
+    - No question marks
+    - No near-duplicate queries (simple lowered check)
+    """
+    seen = set()
+    filtered = []
+    for q in queries:
+        text = q.get("query", "")
+        normalized = text.lower().strip()
+
+        if len(text.split()) > 10:
+            continue
+        if "?" in text:
+            continue
+        if normalized in seen:
+            continue
+
+        seen.add(normalized)
+        filtered.append(q)
+    return filtered
+
+
+def _score_queries(queries: list) -> list:
+    """
+    PDF Step 2 — Local scoring formula:
+    score = 0.4 * simplicity + 0.3 * intent_weight + 0.3 * keyword_strength
+    """
+    scored = []
+    for q in queries:
+        text = q.get("query", "")
+        intent = q.get("intent", "beginner")
+
+        # Simplicity: shorter is better (inverse of word count)
+        simplicity = 1.0 / max(len(text.split()), 1)
+
+        # Intent weight from PDF table
+        intent_weight = INTENT_WEIGHTS.get(intent, 1.0)
+
+        # Keyword strength: check if any strong keyword pattern is present
+        text_lower = text.lower()
+        keyword_hits = sum(1 for kw in STRONG_KEYWORDS if kw in text_lower)
+        keyword_strength = min(keyword_hits / 3.0, 1.0)  # Normalize to 0-1
+
+        final_score = (0.4 * simplicity) + (0.3 * intent_weight) + (0.3 * keyword_strength)
+
+        scored.append({
+            "query": text,
+            "intent": intent,
+            "score": round(final_score, 4),
+        })
+
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return scored
+
+
 async def query_expand_node(state: AgentState):
-    """Uses LLM to expand the selected topic into queries"""
+    """
+    PDF Step 2 — Hybrid Query Expansion:
+    1. LLM generates 3-5 queries per intent bucket (beginner, intermediate,
+       advanced, comparison, problem, trend).
+    2. Local rule-based filtering removes noisy/duplicate/long queries.
+    3. Local scoring ranks remaining queries by simplicity + intent weight + keyword strength.
+    """
     if not state.get("selected_topic"):
         return {"abort_reason": "No valid topic found"}
-        
-    sys_prompt = "You are an elite SEO strategist and intent analyst."
+
+    sys_prompt = "You are an elite SEO strategist and search intent analyst."
     prompt = f"""
-    Analyze the topic: '{state['selected_topic']}'
-    
-    Task: Expand this topic into 3 specific, real-world Google search query variations. These should cover:
-    1. A beginner-friendly educational query (e.g., 'what is X')
-    2. A technical/advanced comparison or deep-dive query (e.g., 'X vs Y architecture')
-    3. An intent-driven problem-solving query (e.g., 'how to optimize X for Y')
-    
+    Topic: '{state['selected_topic']}'
+
+    Generate search queries for EACH of these intent categories:
+    - beginner (e.g., "what is X")
+    - intermediate (e.g., "how X works")
+    - advanced (e.g., "X architecture deep dive")
+    - comparison (e.g., "X vs Y")
+    - problem (e.g., "how to build X for Y")
+    - trend (e.g., "future of X")
+
+    Rules:
+    - Must sound like real Google queries
+    - No long sentences
+    - Max 10 words per query
+    - Generate 3-5 queries per intent
+    - No repetition
+
     Format: Output a JSON object exactly matching this structure:
     {{
         "queries": [
-            {{"query": "string", "intent": "beginner|comparison|advanced|problem", "score": float}}
+            {{"query": "string", "intent": "beginner|intermediate|advanced|comparison|problem|trend"}}
         ]
     }}
     """
     res = generate_structured_response(sys_prompt, prompt)
-    return {"queries": res.get("queries", [])}
+    raw_queries = res.get("queries", [])
+
+    # PDF Step 2: Local filtering (rule-based)
+    filtered = _filter_queries(raw_queries)
+
+    # PDF Step 2: Local scoring (simplicity + intent_weight + keyword_strength)
+    scored = _score_queries(filtered)
+
+    return {"queries": scored}
 
 # ----------------- Parallel Research -----------------
 async def research_arxiv(state: AgentState):
