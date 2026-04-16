@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 
 from app.services.interfaces import BaseTrendTool, Topic
-from app.core.config import Config
+from app.core.config import settings
 
 class GithubTrendsTool(BaseTrendTool):
     async def fetch_topics(self) -> List[Topic]:
@@ -17,8 +17,8 @@ class GithubTrendsTool(BaseTrendTool):
             url = f"https://api.github.com/search/repositories?q={urllib.parse.quote(query)}&sort=stars&order=desc"
             
             headers = {"Accept": "application/vnd.github.v3+json"}
-            if Config.GITHUB_TOKEN:
-                headers["Authorization"] = f"token {Config.GITHUB_TOKEN}"
+            if settings.GITHUB_TOKEN:
+                headers["Authorization"] = f"token {settings.GITHUB_TOKEN}"
                 
             try:
                 async with session.get(url, headers=headers) as response:
@@ -84,7 +84,7 @@ class RedditTrendsTool(BaseTrendTool):
     async def fetch_topics(self) -> List[Topic]:
         async with aiohttp.ClientSession() as session:
             url = "https://www.reddit.com/r/MachineLearning/hot.json?limit=5"
-            headers = {"User-Agent": Config.REDDIT_USER_AGENT}
+            headers = {"User-Agent": settings.REDDIT_USER_AGENT}
             
             try:
                 async with session.get(url, headers=headers) as response:

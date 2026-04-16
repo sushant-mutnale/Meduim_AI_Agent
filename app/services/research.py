@@ -6,7 +6,7 @@ from bs4 import BeautifulSoup
 import xml.etree.ElementTree as ET
 
 from app.services.interfaces import BaseResearchTool, Claim
-from app.core.config import Config
+from app.core.config import settings
 
 semaphore = asyncio.Semaphore(5)
 
@@ -47,8 +47,8 @@ class GithubResearchTool(BaseResearchTool):
             async with aiohttp.ClientSession() as session:
                 url = f"https://api.github.com/search/repositories?q={urllib.parse.quote(query)}&sort=stars&order=desc"
                 headers = {"Accept": "application/vnd.github.v3+json"}
-                if Config.GITHUB_TOKEN:
-                    headers["Authorization"] = f"token {Config.GITHUB_TOKEN}"
+                if settings.GITHUB_TOKEN:
+                    headers["Authorization"] = f"token {settings.GITHUB_TOKEN}"
                 
                 async with session.get(url, headers=headers) as response:
                     if response.status != 200:
@@ -74,7 +74,7 @@ class RedditResearchTool(BaseResearchTool):
         async def _fetch():
             async with aiohttp.ClientSession() as session:
                 url = f"https://www.reddit.com/r/MachineLearning/search.json?q={urllib.parse.quote(query)}&restrict_sr=on&limit=3"
-                headers = {"User-Agent": Config.REDDIT_USER_AGENT}
+                headers = {"User-Agent": settings.REDDIT_USER_AGENT}
                 
                 async with session.get(url, headers=headers) as response:
                     if response.status != 200:
