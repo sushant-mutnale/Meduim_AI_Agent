@@ -25,7 +25,7 @@ def run_pipeline(self):
             "queries": [],
             "arxiv_claims": [],
             "github_claims": [],
-            "reddit_claims": [],
+            "newsapi_claims": [],
             "all_claims": [],
             "validated_claims": [],
             "insights": {},

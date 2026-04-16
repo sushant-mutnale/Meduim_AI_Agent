@@ -7,7 +7,7 @@ from app.jobs.graph_nodes import (
     query_expand_node,
     research_arxiv,
     research_github,
-    research_reddit,
+    research_newsapi,
     merge_research,
     fact_check_node,
     insight_node,
@@ -37,7 +37,7 @@ def build_graph():
     # ═══════════════════════════════════════════════
     builder.add_node("ResearchArxiv", research_arxiv)
     builder.add_node("ResearchGithub", research_github)
-    builder.add_node("ResearchReddit", research_reddit)
+    builder.add_node("ResearchNewsApi", research_newsapi)
     builder.add_node("MergeResearch", merge_research)
     
     # ═══════════════════════════════════════════════
@@ -82,10 +82,10 @@ def build_graph():
     # Fan-out to Parallel Research
     builder.add_edge("QueryExpand", "ResearchArxiv")
     builder.add_edge("QueryExpand", "ResearchGithub")
-    builder.add_edge("QueryExpand", "ResearchReddit")
+    builder.add_edge("QueryExpand", "ResearchNewsApi")
     
     # Fan-in to MergeResearch
-    builder.add_edge(["ResearchArxiv", "ResearchGithub", "ResearchReddit"], "MergeResearch")
+    builder.add_edge(["ResearchArxiv", "ResearchGithub", "ResearchNewsApi"], "MergeResearch")
     
     # Validation & Structuring
     builder.add_edge("MergeResearch", "FactCheck")

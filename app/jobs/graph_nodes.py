@@ -4,8 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing_extensions import TypedDict
 from app.utils.llm import generate_structured_response, run_llm
 from app.agents.cpu_tasks import compute_clustering, compute_ranking, compute_review_heuristics
-from app.services.trends import GithubTrendsTool, ArxivTrendsTool, RedditTrendsTool
-from app.services.research import ArxivResearchTool, GithubResearchTool, RedditResearchTool
+from app.services.trends import GithubTrendsTool, ArxivTrendsTool, NewsApiTrendsTool, GoogleTrendsTool
+from app.services.research import ArxivResearchTool, GithubResearchTool, NewsApiResearchTool
 from app.services.medium import MediumPublisher
 from app.agents.visuals import ChartAgent
 from app.db.session import SessionLocal
@@ -28,7 +28,7 @@ class AgentState(TypedDict):
     # Parallel research
     arxiv_claims: List[Any]
     github_claims: List[Any]
-    reddit_claims: List[Any]
+    newsapi_claims: List[Any]
     all_claims: List[Any]
     
     validated_claims: List[Any]
@@ -46,12 +46,13 @@ class AgentState(TypedDict):
 # ----------------- Discovery Layer -----------------
 async def topic_fetch_node(state: AgentState):
     """Fetches topics using external MCP-like tools (Async I/O)"""
-    t1, t2, t3 = await asyncio.gather(
+    t1, t2, t3, t4 = await asyncio.gather(
         GithubTrendsTool().fetch_topics(),
         ArxivTrendsTool().fetch_topics(),
-        RedditTrendsTool().fetch_topics()
+        NewsApiTrendsTool().fetch_topics(),
+        GoogleTrendsTool().fetch_topics(),
     )
-    all_raw = t1 + t2 + t3
+    all_raw = t1 + t2 + t3 + t4
     return {"raw_topics": all_raw}
 
 async def topic_cluster_node(state: AgentState):
@@ -212,7 +213,8 @@ SOURCE_QUALITY_WEIGHTS = {
     "arxiv": 1.0,
     "github": 0.8,
     "hn": 0.7,
-    "reddit": 0.5,
+    "newsapi": 0.7,
+    "google_trends": 0.5,
 }
 
 
@@ -271,14 +273,14 @@ async def research_github(state: AgentState):
         all_atomic.extend(atomic)
     return {"github_claims": all_atomic}
 
-async def research_reddit(state: AgentState):
-    """Fetches raw data from Reddit, then extracts atomic claims."""
-    raw_claims = await RedditResearchTool().fetch(state["selected_topic"])
+async def research_newsapi(state: AgentState):
+    """Fetches raw data from NewsAPI, then extracts atomic claims."""
+    raw_claims = await NewsApiResearchTool().fetch(state["selected_topic"])
     all_atomic = []
     for claim in raw_claims:
-        atomic = await _extract_atomic_claims(claim.text, f"reddit:{claim.source}")
+        atomic = await _extract_atomic_claims(claim.text, f"newsapi:{claim.source}")
         all_atomic.extend(atomic)
-    return {"reddit_claims": all_atomic}
+    return {"newsapi_claims": all_atomic}
 
 
 def merge_research(state: AgentState):
@@ -290,7 +292,7 @@ def merge_research(state: AgentState):
     all_claims = (
         state.get("arxiv_claims", []) +
         state.get("github_claims", []) +
-        state.get("reddit_claims", [])
+        state.get("newsapi_claims", [])
     )
 
     if not all_claims:

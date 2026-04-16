@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 venv/
 .env
+auth.json
+medium-automation/
+assets/
 
 # Node
 node_modules/

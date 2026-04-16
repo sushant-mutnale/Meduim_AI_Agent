@@ -69,34 +69,57 @@ class GithubResearchTool(BaseResearchTool):
         async with semaphore:
             return await safe_fetch(_fetch())
 
-class RedditResearchTool(BaseResearchTool):
+
+class NewsApiResearchTool(BaseResearchTool):
+    """
+    Replaces RedditResearchTool. Uses NewsAPI /v2/everything endpoint
+    to search for articles related to a specific query, then extracts
+    article descriptions as claims.
+    """
     async def fetch(self, query: str) -> List[Claim]:
         async def _fetch():
+            if not settings.NEWSAPI_KEY:
+                return []
+
             async with aiohttp.ClientSession() as session:
-                url = f"https://www.reddit.com/r/MachineLearning/search.json?q={urllib.parse.quote(query)}&restrict_sr=on&limit=3"
-                headers = {"User-Agent": settings.REDDIT_USER_AGENT}
-                
-                async with session.get(url, headers=headers) as response:
+                params = {
+                    "q": query,
+                    "sortBy": "relevancy",
+                    "language": "en",
+                    "pageSize": "5",
+                    "apiKey": settings.NEWSAPI_KEY,
+                }
+                url = f"https://newsapi.org/v2/everything?{urllib.parse.urlencode(params)}"
+
+                async with session.get(url) as response:
                     if response.status != 200:
                         return []
                     data = await response.json()
-                    
+
                     claims = []
-                    for child in data.get('data', {}).get('children', []):
-                        post = child.get('data', {})
-                        text = post.get('selftext', '')
+                    for article in data.get("articles", [])[:3]:
+                        # Use article content if available, else description
+                        text = article.get("content", "") or article.get("description", "")
                         if not text:
-                            text = post.get('title', '')
-                            
-                        # Limiting length of claim text
-                        text = text[:500] + "..." if len(text) > 500 else text
-                        
+                            continue
+
+                        # Clean up "[+N chars]" suffix from NewsAPI
+                        if "[+" in text:
+                            text = text[:text.rfind("[+")]
+
+                        text = text.strip()
+                        if len(text) < 30:
+                            continue
+
+                        source_url = article.get("url", "")
+                        source_name = article.get("source", {}).get("name", "news")
+
                         claims.append(Claim(
-                            text=text,
-                            source=f"reddit.com{post.get('permalink')}",
-                            confidence=0.7
+                            text=text[:500],
+                            source=f"newsapi:{source_name}|{source_url}",
+                            confidence=0.7,
                         ))
                     return claims
-                    
+
         async with semaphore:
             return await safe_fetch(_fetch())
