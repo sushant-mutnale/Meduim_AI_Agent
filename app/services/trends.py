@@ -29,12 +29,16 @@ class GithubTrendsTool(BaseTrendTool):
                     topics = []
                     for item in data.get('items', [])[:5]: # Top 5
                         name = item.get('name', '').replace('-', ' ').title()
+                        desc = item.get('description', '') or ''
+                        pushed_at = item.get('pushed_at', '')
                         stars = item.get('stargazers_count', 0)
                         # Normalize stars to a 0-1 scale loosely
                         trend_score = min(stars / 5000.0, 1.0) 
                         topics.append(Topic(
                             name=name,
+                            description=desc,
                             source="github",
+                            timestamp=pushed_at,
                             trend_score=trend_score,
                             novelty_score=0.8 # New repos have high novelty
                         ))
@@ -60,9 +64,15 @@ class ArxivTrendsTool(BaseTrendTool):
                     topics = []
                     for entry in entries:
                         title = entry.find('{http://www.w3.org/2005/Atom}title').text.replace('\\n', ' ').strip()
+                        summary_el = entry.find('{http://www.w3.org/2005/Atom}summary')
+                        summary = summary_el.text.strip() if summary_el is not None else ''
+                        published_el = entry.find('{http://www.w3.org/2005/Atom}published')
+                        published = published_el.text.strip() if published_el is not None else ''
                         topics.append(Topic(
                             name=title,
+                            description=summary[:300],  # Truncate for embedding efficiency
                             source="arxiv",
+                            timestamp=published,
                             trend_score=0.9, # ArXiv recent submissions represent cutting edge
                             novelty_score=0.9
                         ))
@@ -87,15 +97,25 @@ class RedditTrendsTool(BaseTrendTool):
                     for child in data.get('data', {}).get('children', []):
                         post = child.get('data', {})
                         title = post.get('title', '')
+                        selftext = post.get('selftext', '') or ''
+                        created_utc = post.get('created_utc', 0)
                         ups = post.get('ups', 0)
                         
                         trend_score = min(ups / 1000.0, 1.0)
+                        
+                        # Convert Unix timestamp to ISO format
+                        ts = ''
+                        if created_utc:
+                            from datetime import datetime as dt
+                            ts = dt.utcfromtimestamp(created_utc).isoformat()
                         
                         # Filter out basic weekly threads based on title if necessary
                         if "Simple Questions" not in title:
                             topics.append(Topic(
                                 name=title,
+                                description=selftext[:300], # Truncate for efficiency
                                 source="reddit",
+                                timestamp=ts,
                                 trend_score=trend_score,
                                 novelty_score=0.6
                             ))

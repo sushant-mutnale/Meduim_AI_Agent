@@ -4,7 +4,9 @@ from pydantic import BaseModel
 
 class Topic(BaseModel):
     name: str
+    description: str = ""
     source: str
+    timestamp: str = ""  # ISO format, for recency/time-decay scoring
     trend_score: float
     novelty_score: float
 
