@@ -201,22 +201,157 @@ async def query_expand_node(state: AgentState):
 
     return {"queries": scored}
 
-# ----------------- Parallel Research -----------------
+# ----------------- Parallel Research (PDF Step 4: Hybrid Claim Extraction) -----------------
+
+# PDF source quality weights for confidence scoring
+SOURCE_QUALITY_WEIGHTS = {
+    "arxiv": 1.0,
+    "github": 0.8,
+    "hn": 0.7,
+    "reddit": 0.5,
+}
+
+
+async def _extract_atomic_claims(raw_text: str, source: str) -> list:
+    """
+    PDF Step 4 — Use LLM to extract atomic, standalone claims from raw text.
+    Each claim must be standalone, no opinions, max 20 words.
+    Returns list of dicts with text, source, url keys.
+    """
+    if not raw_text or len(raw_text.strip()) < 30:
+        return []
+
+    sys_prompt = "You are a precise research analyst. Extract only factual claims."
+    prompt = f"""
+    Extract factual claims from this text.
+    - Each claim must be standalone
+    - No opinions
+    - Max 20 words per claim
+    - Return only verifiable factual statements
+
+    Text:
+    {raw_text[:2000]}
+
+    Format: Output JSON:
+    {{
+        "claims": [
+            {{"text": "standalone factual claim"}}
+        ]
+    }}
+    """
+    try:
+        res = generate_structured_response(sys_prompt, prompt)
+        claims = res.get("claims", [])
+        # Enrich with source metadata
+        return [{"text": c.get("text", ""), "source": source, "confidence": 0.5} for c in claims if c.get("text")]
+    except Exception:
+        # Fallback: use raw text as a single claim
+        return [{"text": raw_text[:200], "source": source, "confidence": 0.3}]
+
+
 async def research_arxiv(state: AgentState):
-    data = await ArxivResearchTool().fetch(state["selected_topic"])
-    return {"arxiv_claims": data}
+    """Fetches raw data from ArXiv, then extracts atomic claims."""
+    raw_claims = await ArxivResearchTool().fetch(state["selected_topic"])
+    all_atomic = []
+    for claim in raw_claims:
+        atomic = await _extract_atomic_claims(claim.text, f"arxiv:{claim.source}")
+        all_atomic.extend(atomic)
+    return {"arxiv_claims": all_atomic}
 
 async def research_github(state: AgentState):
-    data = await GithubResearchTool().fetch(state["selected_topic"])
-    return {"github_claims": data}
+    """Fetches raw data from GitHub, then extracts atomic claims."""
+    raw_claims = await GithubResearchTool().fetch(state["selected_topic"])
+    all_atomic = []
+    for claim in raw_claims:
+        atomic = await _extract_atomic_claims(claim.text, f"github:{claim.source}")
+        all_atomic.extend(atomic)
+    return {"github_claims": all_atomic}
 
 async def research_reddit(state: AgentState):
-    data = await RedditResearchTool().fetch(state["selected_topic"])
-    return {"reddit_claims": data}
+    """Fetches raw data from Reddit, then extracts atomic claims."""
+    raw_claims = await RedditResearchTool().fetch(state["selected_topic"])
+    all_atomic = []
+    for claim in raw_claims:
+        atomic = await _extract_atomic_claims(claim.text, f"reddit:{claim.source}")
+        all_atomic.extend(atomic)
+    return {"reddit_claims": all_atomic}
+
 
 def merge_research(state: AgentState):
-    claims = state.get("arxiv_claims", []) + state.get("github_claims", []) + state.get("reddit_claims", [])
-    return {"all_claims": [c.model_dump() for c in claims]}
+    """
+    PDF Step 4 — Merge + Deduplicate claims using sentence-transformer embeddings.
+    If cosine(claim1, claim2) > 0.85 → merge (keep the one with more sources).
+    Then apply confidence scoring: 0.5*source_count + 0.3*source_quality + 0.2*consistency.
+    """
+    all_claims = (
+        state.get("arxiv_claims", []) +
+        state.get("github_claims", []) +
+        state.get("reddit_claims", [])
+    )
+
+    if not all_claims:
+        return {"all_claims": []}
+
+    # Handle both Pydantic objects and raw dicts
+    claim_dicts = []
+    for c in all_claims:
+        if hasattr(c, "model_dump"):
+            claim_dicts.append(c.model_dump())
+        elif isinstance(c, dict):
+            claim_dicts.append(c)
+
+    if not claim_dicts:
+        return {"all_claims": []}
+
+    # Deduplicate using sentence-transformer embeddings
+    try:
+        from app.agents.cpu_tasks import _get_embedding_model
+        model = _get_embedding_model()
+        texts = [c["text"] for c in claim_dicts]
+        embeddings = model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+
+        from sklearn.metrics.pairwise import cosine_similarity as cos_sim
+        sim_matrix = cos_sim(embeddings, embeddings)
+
+        merged_indices = set()
+        deduplicated = []
+
+        for i in range(len(claim_dicts)):
+            if i in merged_indices:
+                continue
+
+            cluster_sources = [claim_dicts[i].get("source", "")]
+
+            for j in range(i + 1, len(claim_dicts)):
+                if j not in merged_indices and sim_matrix[i][j] > 0.85:
+                    merged_indices.add(j)
+                    cluster_sources.append(claim_dicts[j].get("source", ""))
+
+            # Collect unique sources for this deduplicated claim
+            unique_sources = list(set(cluster_sources))
+            source_count = len(unique_sources)
+
+            # PDF confidence formula: 0.5*source_count + 0.3*source_quality + 0.2*consistency
+            avg_quality = sum(
+                SOURCE_QUALITY_WEIGHTS.get(s.split(":")[0], 0.5)
+                for s in unique_sources
+            ) / max(source_count, 1)
+            consistency = min(source_count / 3.0, 1.0)  # 3+ sources = max consistency
+
+            confidence = (0.5 * min(source_count / 3.0, 1.0)) + (0.3 * avg_quality) + (0.2 * consistency)
+
+            deduplicated.append({
+                "text": claim_dicts[i]["text"],
+                "sources": unique_sources,
+                "source_count": source_count,
+                "confidence": round(confidence, 3),
+            })
+
+        return {"all_claims": deduplicated}
+
+    except ImportError:
+        # Fallback if sentence-transformers not available
+        return {"all_claims": claim_dicts}
 
 # ----------------- Fact & Insight -----------------
 async def fact_check_node(state: AgentState):
