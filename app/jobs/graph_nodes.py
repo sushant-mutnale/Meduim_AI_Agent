@@ -57,7 +57,11 @@ async def topic_cluster_node(state: AgentState):
     return {"clustered_topics": result}
 
 async def ranking_node(state: AgentState):
-    """Ranks topics utilizing DB Memory for failures and CPU pooling"""
+    """
+    PDF Step 3 — Ranking / Decision Engine:
+    Uses DB Memory to penalize previously failed topics.
+    Delegates to compute_ranking which implements confidence gap + NO_DECISION fallback.
+    """
     # Quick DB sync query for memory
     db = SessionLocal()
     failed_topics = [loc.topic_name for loc in db.query(MemoryLog).filter(MemoryLog.performance_status != "pass").all()]
@@ -65,6 +69,15 @@ async def ranking_node(state: AgentState):
     
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(executor, compute_ranking, state["clustered_topics"], failed_topics)
+    
+    # PDF Step 3: Handle NO_DECISION fallback
+    if result.get("status") == "NO_DECISION":
+        return {
+            "ranking_data": result,
+            "selected_topic": "",
+            "abort_reason": result.get("reason", "Ranking confidence too low to proceed."),
+        }
+    
     return {"ranking_data": result, "selected_topic": result.get("selected_topic", "")}
 
 # ----------------- Query Expansion (PDF Step 2: Hybrid) -----------------
