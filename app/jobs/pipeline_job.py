@@ -30,6 +30,7 @@ def run_pipeline(self):
             "validated_claims": [],
             "insights": {},
             "outline": {},
+            "visual_plan": [],
             "draft": {},
             "review_status": "in_progress",
             "revision_count": 0,

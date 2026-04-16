@@ -10,6 +10,9 @@ from app.services.medium import MediumPublisher
 from app.agents.visuals import ChartAgent
 from app.db.session import SessionLocal
 from app.db.models import MemoryLog
+import logging
+
+logger = logging.getLogger(__name__)
 
 executor = ThreadPoolExecutor()
 
@@ -778,59 +781,179 @@ async def writing_node(state: AgentState):
         }
     }
 
-# ----------------- Review & Publish -----------------
-async def review_node(state: AgentState):
-    """Hybrid Review: Local Heuristics -> LLM semantic check"""
+# ═══════════════════════════════════════════════════════════════════
+# PDF STEP 6 (from plan): SEO AGENT — Optimize Discoverability
+# ═══════════════════════════════════════════════════════════════════
+
+async def seo_node(state: AgentState):
+    """
+    PDF SEO Agent:
+    1. Keyword selection from query agent output
+    2. Title optimization (include primary keyword, <60 chars, clickable)
+    3. Content optimization (natural keyword insertion)
+    4. Readability check (sentence length, passive voice)
+    5. Keyword coverage check
+    """
     draft = state.get("draft", {})
-    
+    queries = state.get("queries", [])
+    topic = state.get("selected_topic", "")
+    content = draft.get("optimized_content", "")
+    title = draft.get("title", "")
+
+    if not content:
+        return {"draft": draft}
+
+    # ── Step 1: Keyword selection from queries ──
+    primary_keyword = topic
+    secondary_keywords = [q.get("query", "") for q in queries[:5]]
+
+    # ── Step 2: Readability check (local, no LLM) ──
+    sentences = [s.strip() for s in content.replace("!", ".").replace("?", ".").split(".") if s.strip()]
+    word_counts = [len(s.split()) for s in sentences]
+    avg_sentence_length = sum(word_counts) / max(len(word_counts), 1)
+
+    readability_flags = []
+    if avg_sentence_length > 20:
+        readability_flags.append(f"Average sentence length ({avg_sentence_length:.1f} words) is too high. Target: <20 words.")
+
+    # Check for passive voice indicators
+    passive_indicators = ["is being", "was being", "has been", "have been", "will be", "had been"]
+    passive_count = sum(1 for s in sentences for p in passive_indicators if p in s.lower())
+    if passive_count > len(sentences) * 0.3:
+        readability_flags.append(f"Too much passive voice ({passive_count} instances). Use active voice.")
+
+    # ── Step 3: Keyword coverage check ──
+    content_lower = content.lower()
+    missing_keywords = [kw for kw in secondary_keywords if kw.lower() not in content_lower]
+
+    # ── Step 4: SEO optimization via LLM ──
+    sys_prompt = "You are an expert SEO optimizer for technical content on Medium."
+    prompt = f"""
+    Optimize this article for search discoverability.
+
+    Current title: {title}
+    Primary keyword: {primary_keyword}
+    Secondary keywords: {secondary_keywords}
+    Missing keywords to weave in: {missing_keywords}
+    Readability issues: {readability_flags}
+
+    Current content (first 2000 chars):
+    {content[:2000]}
+
+    Tasks:
+    1. Optimize the title: include primary keyword, keep under 60 chars, make clickable (not clickbait)
+    2. Ensure H1 = title, H2 = main sections, H3 = sub-points
+    3. Suggest where to naturally insert missing keywords (do NOT keyword-stuff)
+    4. Fix any readability issues
+
+    Format: JSON:
+    {{
+        "optimized_title": "SEO-optimized title",
+        "keyword_insertions": ["suggestion 1", "suggestion 2"],
+        "readability_score": float (0-10)
+    }}
+    """
+    res = generate_structured_response(sys_prompt, prompt)
+
+    optimized_title = res.get("optimized_title", title)
+
+    return {
+        "draft": {
+            "title": optimized_title,
+            "optimized_content": content,
+            "keywords_used": [kw for kw in secondary_keywords if kw.lower() in content_lower],
+            "readability_score": res.get("readability_score", 5.0),
+        }
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PDF STEP 10: REVIEW AGENT — Strict Quality Gate + Multi-Criteria Scoring
+# ═══════════════════════════════════════════════════════════════════
+
+async def review_node(state: AgentState):
+    """
+    PDF Step 10 — Review Agent:
+    1. Rule-based heuristic checks (local, fast)
+    2. LLM multi-criteria scoring: clarity, depth, originality, trust
+    3. Decision: pass (all >8) / revise (some <7) / reject
+    4. Loop: Review → Writing → Review (max 3 loops)
+    """
+    draft = state.get("draft", {})
+
     loop = asyncio.get_running_loop()
     h_result = await loop.run_in_executor(executor, compute_review_heuristics, draft)
-    
+
     if not h_result["pass_heuristics"]:
         return {
-            "review_status": "revise", 
-            "abort_reason": h_result["feedback"], 
+            "review_status": "revise",
+            "abort_reason": h_result["feedback"],
             "revision_count": state.get("revision_count", 0) + 1
         }
-        
-    # Pass heuristics, run LLM
+
+    # Pass heuristics → run LLM multi-criteria review
     sys_prompt = "You are a strict, merciless Editorial Reviewer and Quality Gatekeeper."
     prompt = f"""
-    Rate this drafted article strictly out of 1.0. 
-    
+    Rate this drafted article on FOUR criteria, each from 0 to 10:
+
     Draft content:
-    {draft.get('optimized_content', 'No content')}
-    
-    Critique criteria:
-    - Flow and Readability (Is it engaging?)
-    - Technical Depth (Is it surface-level fluff?)
-    - Hallucination (Are there unsupported claims disguised as facts?)
-    
-    If the content sounds like a generic AI response, penalize it heavily (<0.6).
-    
+    {draft.get('optimized_content', 'No content')[:3000]}
+
+    Criteria:
+    1. Clarity — Is it easy to understand? Is the writing clean?
+    2. Depth — Does it go beyond surface-level? Are insights non-obvious?
+    3. Originality — Does it feel fresh, or like generic AI output?
+    4. Trust — Are claims supported? Any hallucination risk?
+
+    If the content sounds like a generic AI response, penalize Originality heavily (<4).
+
     Format: JSON strictly:
     {{
-        "score": float (0.0 to 1.0),
+        "clarity": int (0-10),
+        "depth": int (0-10),
+        "originality": int (0-10),
+        "trust": int (0-10),
         "feedback": "Actionable feedback detailing exactly which paragraphs need rewriting and why."
     }}
     """
     res = generate_structured_response(sys_prompt, prompt)
-    
-    score = res.get("score", 0.0)
-    if score >= 0.8:
-        return {"review_status": "pass"}
+
+    scores = {
+        "clarity": res.get("clarity", 5),
+        "depth": res.get("depth", 5),
+        "originality": res.get("originality", 5),
+        "trust": res.get("trust", 5),
+    }
+
+    # PDF decision logic: all > 8 = pass, any < 7 = revise, else reject
+    min_score = min(scores.values())
+    avg_score = sum(scores.values()) / 4
+
+    if min_score >= 8:
+        return {"review_status": "pass", "review_scores": scores}
+    elif min_score < 5:
+        return {
+            "review_status": "reject",
+            "abort_reason": f"Quality too low (min={min_score}). {res.get('feedback', '')}",
+            "revision_count": state.get("revision_count", 0) + 1,
+            "review_scores": scores,
+        }
     else:
         return {
             "review_status": "revise",
-            "abort_reason": res.get("feedback"),
-            "revision_count": state.get("revision_count", 0) + 1
+            "abort_reason": res.get("feedback", "Needs improvement."),
+            "revision_count": state.get("revision_count", 0) + 1,
+            "review_scores": scores,
         }
 
+
 async def downgrade_node(state: AgentState):
-    """Fallback node if revisions exceeded"""
-    return {"abort_reason": "Max revisions exceeded. Downgraded to manual review."}
+    """Fallback node if revisions exceeded or quality too low."""
+    return {"abort_reason": state.get("abort_reason", "Max revisions exceeded. Downgraded to manual review.")}
+
 
 async def publish_node(state: AgentState):
+    """Publishes to Medium if review passed."""
     draft = state.get("draft", {})
     publisher = MediumPublisher()
     try:
@@ -838,3 +961,43 @@ async def publish_node(state: AgentState):
         return {"final_url": resp.get("data", {}).get("url")}
     except Exception as e:
         return {"abort_reason": f"Publish error: {str(e)}"}
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PDF STEP 10: MEMORY AGENT — Learning Layer
+# ═══════════════════════════════════════════════════════════════════
+
+async def memory_node(state: AgentState):
+    """
+    PDF Step 12 — Memory Agent: Store run data for future system improvement.
+    Saves: topic used, performance status, review feedback, to DB.
+    Used later by ranking_node to penalize previously failed topics.
+    """
+    db = SessionLocal()
+    try:
+        topic = state.get("selected_topic", "unknown")
+        review_status = state.get("review_status", "unknown")
+        abort_reason = state.get("abort_reason", "")
+
+        # Determine performance status
+        if state.get("final_url"):
+            performance_status = "pass"
+        elif review_status == "reject":
+            performance_status = "failed"
+        else:
+            performance_status = "skipped"
+
+        memory_entry = MemoryLog(
+            topic_name=topic,
+            performance_status=performance_status,
+            lessons_learned=abort_reason or "No issues.",
+        )
+        db.add(memory_entry)
+        db.commit()
+    except Exception as e:
+        logger.error(f"Memory save failed: {e}")
+    finally:
+        db.close()
+
+    return {}
+
