@@ -8,6 +8,7 @@ class RunLog(Base):
     """
     PDF Step 10: Tracks each pipeline run end-to-end.
     Stores status, timing, and links to all artifacts produced.
+    
     """
     __tablename__ = "run_logs"
     id = Column(Integer, primary_key=True, index=True)
